@@ -17,9 +17,9 @@ class Application {
             $this -> src -> connect(
                 new DatabaseConnectionData(
                     '127.0.0.1', 
-                    '3350', 
-                    'chrome_dev', 
-                    'houseP4rty', 
+                    '3351', 
+                    'vtsutsman', 
+                    'DevHack32', 
                     'chrome_expense'
                 )
             );
@@ -28,8 +28,8 @@ class Application {
                 new DatabaseConnectionData(
                     'localhost', 
                     '3306', 
-                    'chrome_dev', 
-                    'houseP4rty', 
+                    'root', 
+                    'developer', 
                     'chrome_expense'
                 )
             );
@@ -123,6 +123,7 @@ interface DatabaseScheme {
 
     public function getTables();
     public function getCreateTableSQL( $tableName );
+    public function getTableDescribe( $tableName );
     public function getStoredProcedures();
     public function getStoredProcedureSQL( $procedureName );
     public function getCountRecords($tableName);
@@ -130,9 +131,10 @@ interface DatabaseScheme {
 
     public function createTable( $tableName, $sql );
     public function createStoredProcedure( $sql );
-    public function createRecords($tableName, $records);
+    public function createRecords($tableName, $table, $records);
 
     public function setConnection( $connection );
+    public function setLink( $link );
 }
 
 class MySQLScheme implements DatabaseScheme {
@@ -140,6 +142,7 @@ class MySQLScheme implements DatabaseScheme {
     private $connection;
     private $databaseName;
     private $condition;
+    private $link;
 
     /**
      * MySQLScheme constructor.
@@ -150,6 +153,7 @@ class MySQLScheme implements DatabaseScheme {
         $this -> connection = $connection;
         $this -> databaseName = $databaseName;
         $this -> condition = $condition;
+        
     }
 
 
@@ -177,16 +181,30 @@ class MySQLScheme implements DatabaseScheme {
         return $table[ 1 ];
     }
 
+    public function getTableDescribe( $tableName ) {
+        $response = mysql_query(
+            "DESCRIBE {$this->databaseName}.$tableName", 
+            $this->connection
+        ) or die('ERR::GET_TABLE_SQL' . mysql_error($this->connection));
+
+        $result = [];
+        while ($table = mysql_fetch_object($response) ) {
+            array_push($result, $table);
+        }
+
+        return $result;
+    }
+
     public function getStoredProcedures()
     {
         $result = array();
-        $response = mysql_qyery(
-            "SHOW PROCEDURE STATUS",
+        $response = mysql_query(
+            "SHOW PROCEDURE STATUS WHERE Db = 'chrome_expense'",
             $this -> connection
         ) or die('ERR::GET_PROCEDURES');
 
         while( $procedure = mysql_fetch_row($response) ) {
-            array_push( $result, $procedure[ 0 ] );
+            array_push( $result, $procedure[ 1 ] );
         }
 
         return $result;
@@ -197,11 +215,11 @@ class MySQLScheme implements DatabaseScheme {
         $response = mysql_query(
             "SHOW CREATE PROCEDURE {$this->databaseName}.$procedureName",
             $this->connection
-        ) or die('ERR::GET_TABLE_SQL' . mysql_error($this->connection));
+        ) or die('ERR::GET_PROCEDURE_SQL ' . mysql_error($this->connection));
 
         $procedure = mysql_fetch_row($response);
 
-        return $procedure[ 1 ];
+        return $procedure[ 2 ];
     }
 
     public function getCountRecords($tableName) {
@@ -211,9 +229,9 @@ class MySQLScheme implements DatabaseScheme {
         );
         if (!$response)
             $response = mysql_query(
-                "SELECT COUNT(*) FROM $tableName",
+                "SELECT COUNT(*) AS count FROM $tableName",
                 $this->connection
-            );
+            ) or die('ERR::GET_COUNT');
 
         $count = mysql_fetch_object($response);
 
@@ -253,20 +271,35 @@ class MySQLScheme implements DatabaseScheme {
             throw new Exception('ERR::CREATE_PROCEDURE ' . mysql_error($this->connection));
     }
 
-    public function createRecords($tableName, $records) {
+    public function createRecords($tableName, $table, $records) {
         $sql = "INSERT INTO $tableName VALUES ";
         foreach ($records as $record) {
             $sql .= '(';
-                foreach ($record as $val)
-                    $sql .= $val . ',';
+                $i = 0;
+                foreach ($record as $val) {
+                    if (strstr($table[$i] -> Type, 'char')
+                        || strstr($table[$i] -> Type, 'time')
+                        || strstr($table[$i] -> Type, 'text')
+                    )
+                        $sql .= "'" . addslashes($val) . "',";
+                    elseif (is_null($val))
+                        $sql .= 'NULL,';
+                    else
+                        $sql .= $val . ',';
+                    $i++;
+                }
             $sql = substr($sql, 0, strlen($sql) - 1);
-            $sql .= '),';
+            $sql .= "),\n";
         }
         $sql = substr($sql, 0, strlen($sql) - 1);
+        $sql .= ';';
+        
+        fwrite($this->link, $sql);
+        fwrite($this->link, "\n\n");
 
-        $response = mysql_query($sql, $this->connection);
-        if (!$response)
-            throw new Exception('ERR::INSERT ' . mysql_error($this->connection));
+//        $response = mysql_query($sql, $this->connection);
+//        if (!$response)
+//            throw new Exception('ERR::INSERT ' . mysql_error($this->connection));
     }
 
     /**
@@ -275,6 +308,10 @@ class MySQLScheme implements DatabaseScheme {
     public function setConnection($connection)
     {
         $this->connection = $connection;
+    }
+
+    public function setLink($link) {
+        $this -> link = $link;
     }
 }
 
@@ -339,49 +376,59 @@ class MySQLAdapter implements DatabaseAdapter {
     {
         // Copy Tables
         $newScheme = new MySQLScheme($this->connection, $this -> databaseName, ' CustomerID = 361 ');
-            $createdTables = $newScheme->getTables();
+//            $createdTables = $newScheme->getTables();
 
         $tables = $scheme -> getTables();
-
-        $tables = array_diff($tables, $createdTables);
-        foreach ($tables as $tableName) {
-            try {
-                $newScheme -> createTable(
-                    $tableName, 
-                    $scheme -> getCreateTableSQL($tableName)
-                );
-            } catch (Exception $e) {
-                echo $tableName, ' was not created.', $e->getMessage(), "\n";
-                continue;
-            }
-        }
-
-        // Copy Procedures/function
-        $createdProcedures = $newScheme -> getStoredProcedures();
-
-        $procedures = $scheme -> getStoredProcedures();
-        $procedures = array_diff($procedures, $createdProcedures);
-        foreach ($procedures as $procedureName) {
-            try {
-                $newScheme -> createStoredProcedure(
-                    $scheme -> getStoredProcedureSQL( $procedureName )
-                );
-            } catch( Exception $e ) {
-                echo $procedureName, ' was not created. ', $e -> getMessage(), "\n";
-                continue;
-            }
-        }
-
-        //FIXME: move to own class
+//
+//        $tables = array_diff($tables, $createdTables);
 //        foreach ($tables as $tableName) {
-//            $count = $scheme -> getCountRecords($tableName);
-//            for ($i = 0; $i < $count; $i += 100) {
-//                $newScheme -> createRecords(
-//                    $tableName,
-//                    $scheme -> getRecords($tableName, $i, 100)
+//            try {
+//                $newScheme -> createTable(
+//                    $tableName, 
+//                    $scheme -> getCreateTableSQL($tableName)
 //                );
+//            } catch (Exception $e) {
+//                echo $tableName, ' was not created.', $e->getMessage(), "\n";
+//                continue;
 //            }
 //        }
+
+        // Copy Procedures/function
+//        $createdProcedures = $newScheme -> getStoredProcedures();
+//
+//        $procedures = $scheme -> getStoredProcedures();
+//        $procedures = array_diff($procedures, $createdProcedures);
+//        foreach ($procedures as $procedureName) {
+//            try {
+//                $newScheme -> createStoredProcedure(
+//                    $scheme -> getStoredProcedureSQL( $procedureName )
+//                );
+//            } catch( Exception $e ) {
+//                echo $procedureName, ' was not created. ', $e -> getMessage(), "\n";
+//                continue;
+//            }
+//        }
+
+        //FIXME: move to own class
+        foreach ($tables as $tableName) {
+            try {
+                $f = fopen('/media/vtsutsman/1df3508c-c324-40b6-84d4-f503ea709241/cr/cr_data-' . $tableName . '.sql', 'a+');
+                $newScheme->setLink($f);
+                $count = $scheme -> getCountRecords($tableName);
+                for ($i = 0; $i <= $count; $i += 100) {
+                    $newScheme -> createRecords(
+                        $tableName, 
+                        $scheme -> getTableDescribe($tableName), 
+                        $scheme -> getRecords($tableName, $i, 100)
+                    );
+                    echo 'Inserted ', $tableName, ' ', $i, "/$count\n";
+                }
+                fclose($f);
+            } catch (Exception $e) {
+                echo 'Skipped: ', $tableName, ' ', $e -> getMessage(), "\n";
+                continue;
+            }
+        }
     }
 }
 
