@@ -4,7 +4,9 @@
  *
  * @author Vitaliy Tsutsman <vitaliyacm@gmail.com>
  */
+
 set_time_limit(0);
+
 class Application {
 
     private $src;
@@ -121,8 +123,14 @@ interface DatabaseScheme {
 
     public function getTables();
     public function getCreateTableSQL( $tableName );
+    public function getStoredProcedures();
+    public function getStoredProcedureSQL( $procedureName );
+    public function getCountRecords($tableName);
+    public function getRecords($tableName, $offset, $limit);
 
     public function createTable( $tableName, $sql );
+    public function createStoredProcedure( $sql );
+    public function createRecords($tableName, $records);
 
     public function setConnection( $connection );
 }
@@ -131,15 +139,17 @@ class MySQLScheme implements DatabaseScheme {
 
     private $connection;
     private $databaseName;
+    private $condition;
 
     /**
      * MySQLScheme constructor.
      * @param $connection
      */
-    public function __construct($connection, $databaseName)
+    public function __construct($connection, $databaseName, $condition)
     {
-        $this->connection = $connection;
+        $this -> connection = $connection;
         $this -> databaseName = $databaseName;
+        $this -> condition = $condition;
     }
 
 
@@ -167,11 +177,96 @@ class MySQLScheme implements DatabaseScheme {
         return $table[ 1 ];
     }
 
+    public function getStoredProcedures()
+    {
+        $result = array();
+        $response = mysql_qyery(
+            "SHOW PROCEDURE STATUS",
+            $this -> connection
+        ) or die('ERR::GET_PROCEDURES');
+
+        while( $procedure = mysql_fetch_row($response) ) {
+            array_push( $result, $procedure[ 0 ] );
+        }
+
+        return $result;
+    }
+
+    public function getStoredProcedureSQL($procedureName)
+    {
+        $response = mysql_query(
+            "SHOW CREATE PROCEDURE {$this->databaseName}.$procedureName",
+            $this->connection
+        ) or die('ERR::GET_TABLE_SQL' . mysql_error($this->connection));
+
+        $procedure = mysql_fetch_row($response);
+
+        return $procedure[ 1 ];
+    }
+
+    public function getCountRecords($tableName) {
+        $response = mysql_query(
+            "SELECT COUNT(*) AS count FROM $tableName WHERE {$this -> condition}",
+            $this->connection
+        );
+        if (!$response)
+            $response = mysql_query(
+                "SELECT COUNT(*) FROM $tableName",
+                $this->connection
+            );
+
+        $count = mysql_fetch_object($response);
+
+        return $count -> count;
+    }
+
+    public function getRecords($tableName, $offset, $limit) {
+        $response = mysql_query(
+            "SELECT * FROM $tableName WHERE {$this -> condition} LIMIT $offset, $limit",
+            $this->connection
+        );
+        if (!$response)
+            $response = mysql_query(
+                "SELECT COUNT(*) FROM $tableName LIMIT $offset, $limit",
+                $this->connection
+            );
+
+        $result = [];
+        while ($row = mysql_fetch_row($response) ) {
+            array_push($result, $row);
+        }
+
+        return $result;
+    }
+
     public function createTable($tableName, $sql)
     {
         $result = mysql_query($sql, $this -> connection);// or die('ERR::CREATEA_TABLE' . mysql_error($this->connection));
         if (!$result)
-            throw new Exception('ERR::CREATEA_TABLE ' . mysql_error($this->connection));
+            throw new Exception('ERR::CREATE_TABLE ' . mysql_error($this->connection));
+    }
+
+    public function createStoredProcedure($sql)
+    {
+        $result = mysql_query($sql, $this -> connection);// or die('ERR::CREATEA_TABLE' . mysql_error($this->connection));
+        if (!$result)
+            throw new Exception('ERR::CREATE_PROCEDURE ' . mysql_error($this->connection));
+    }
+
+    public function createRecords($tableName, $records) {
+        $sql = "INSERT INTO $tableName VALUES ";
+        foreach ($records as $record) {
+            $sql .= '(';
+                foreach ($record as $val)
+                    $sql .= $val . ',';
+            $sql = substr($sql, 0, strlen($sql) - 1);
+            $sql .= '),';
+        }
+        $sql = substr($sql, 0, strlen($sql) - 1);
+
+        $response = mysql_query($sql, $this->connection);
+        if (!$response)
+            throw new Exception('ERR::INSERT ' . mysql_error($this->connection));
     }
 
     /**
@@ -233,16 +328,21 @@ class MySQLAdapter implements DatabaseAdapter {
 
     public function getScheme()
     {
-        return new MySQLScheme($this->connection, $this -> databaseName);
+        return new MySQLScheme(
+            $this->connection,
+            $this -> databaseName,
+            ' CustomerID = 361 '
+        );
     }
 
     public function setScheme( DatabaseScheme $scheme )
     {
-        $newScheme = new MySQLScheme($this->connection, $this -> databaseName);
+        // Copy Tables
+        $newScheme = new MySQLScheme($this->connection, $this -> databaseName, ' CustomerID = 361 ');
             $createdTables = $newScheme->getTables();
 
         $tables = $scheme -> getTables();
-//        var_dump($tables);die();
+
         $tables = array_diff($tables, $createdTables);
         foreach ($tables as $tableName) {
             try {
@@ -255,6 +355,33 @@ class MySQLAdapter implements DatabaseAdapter {
                 continue;
             }
         }
+
+        // Copy Procedures/function
+        $createdProcedures = $newScheme -> getStoredProcedures();
+
+        $procedures = $scheme -> getStoredProcedures();
+        $procedures = array_diff($procedures, $createdProcedures);
+        foreach ($procedures as $procedureName) {
+            try {
+                $newScheme -> createStoredProcedure(
+                    $scheme -> getStoredProcedureSQL( $procedureName )
+                );
+            } catch( Exception $e ) {
+                echo $procedureName, ' was not created. ', $e -> getMessage(), "\n";
+                continue;
+            }
+        }
+
+        //FIXME: move to own class
+//        foreach ($tables as $tableName) {
+//            $count = $scheme -> getCountRecords($tableName);
+//            for ($i = 0; $i < $count; $i += 100) {
+//                $newScheme -> createRecords(
+//                    $tableName,
+//                    $scheme -> getRecords($tableName, $i, 100)
+//                );
+//            }
+//        }
     }
 }
 
